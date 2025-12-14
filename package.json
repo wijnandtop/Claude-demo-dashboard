@@ -1,0 +1,39 @@
+{
+  "name": "claude-dashboard",
+  "version": "1.0.0",
+  "description": "Interactive dashboard for Claude sessions",
+  "type": "module",
+  "bin": {
+    "claude-dashboard": "./cli.js"
+  },
+  "scripts": {
+    "start": "node cli.js",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "server": "node server/index.js"
+  },
+  "dependencies": {
+    "inquirer": "^9.2.12",
+    "open": "^10.0.3",
+    "glob": "^10.3.10",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "socket.io-client": "^4.7.2",
+    "socket.io": "^4.7.2",
+    "chokidar": "^3.5.3",
+    "@anthropic-ai/sdk": "^0.32.1",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "vite": "^5.0.11",
+    "@vitejs/plugin-react": "^4.2.1",
+    "@types/react": "^18.2.43",
+    "@types/react-dom": "^18.2.17"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
