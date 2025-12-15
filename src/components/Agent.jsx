@@ -186,7 +186,7 @@ const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
           <div className="agent-messages">
             <h4 className="messages-title">{language === 'nl' ? 'Berichten' : 'Messages'}</h4>
             <div className="messages-list">
-              {agent.messages.slice(-5).map((message, index) => (
+              {agent.messages.slice(-5).reverse().map((message, index) => (
                 <div key={index} className="message-item">
                   <span className="message-timestamp">{formatTimestamp(message.timestamp)}</span>
                   <span className="message-text">{message.text}</span>
@@ -200,7 +200,7 @@ const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
           <div className="agent-actions">
             <h4 className="actions-title">{language === 'nl' ? 'Acties' : 'Actions'}</h4>
             <div className="actions-list">
-              {agent.actions.slice(-5).map((action, index) => (
+              {agent.actions.slice(-5).reverse().map((action, index) => (
                 <div key={index} className="action-item">
                   <span className="action-icon">{getActionIcon(action.name)}</span>
                   <span className="action-name">{action.name}</span>
