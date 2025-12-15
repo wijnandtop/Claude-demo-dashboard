@@ -499,6 +499,12 @@ body.light-theme {
   white-space: nowrap;
 }
 
+/* Agent wrapper - ensure it fills grid cell */
+.agent {
+  width: 100%;
+  min-width: 0; /* Allow shrinking in grid */
+}
+
 /* Collapsed done agents */
 .agent-done {
   opacity: 0.6;
