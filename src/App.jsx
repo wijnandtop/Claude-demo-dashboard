@@ -4,6 +4,7 @@ import Orchestrator from './components/Orchestrator'
 import Agent from './components/Agent'
 import SessionSelector from './components/SessionSelector'
 import Timeline from './components/Timeline'
+import { getZoomWindowMs } from './utils/formatters'
 
 function App() {
   // Get session from URL query parameter - used for initial state
@@ -308,16 +309,6 @@ function App() {
     return 0
   }
 
-  // Get zoom window in milliseconds
-  const getZoomWindowMs = (zoom) => {
-    switch (zoom) {
-      case '10min': return 10 * 60 * 1000
-      case 'hour': return 60 * 60 * 1000
-      case 'day': return 24 * 60 * 60 * 1000
-      case 'all':
-      default: return Infinity
-    }
-  }
 
   // Memoize filtered and sorted agents based on timeline zoom
   const sortedAgents = useMemo(() => {

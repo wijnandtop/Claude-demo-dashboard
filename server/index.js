@@ -1042,7 +1042,13 @@ io.on('connection', (socket) => {
   });
 });
 
-httpServer.listen(PORT, () => {
-  console.log(`Dashboard server running on http://localhost:${PORT}`);
-  console.log('WebSocket ready for connections');
-});
+// Only start server if not in test environment
+if (process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true') {
+  httpServer.listen(PORT, () => {
+    console.log(`Dashboard server running on http://localhost:${PORT}`);
+    console.log('WebSocket ready for connections');
+  });
+}
+
+// Export for testing
+export { parseAgentFile, decodeProjectPath, processAgentFreshness };

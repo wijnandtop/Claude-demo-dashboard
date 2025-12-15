@@ -1,4 +1,5 @@
 import { useEffect, useRef, memo, useState } from 'react'
+import { formatDuration as formatDurationUtil } from '../utils/formatters'
 
 const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
   const avatarSeed = agent.id || `${agent.name}-${Math.random()}`
@@ -74,17 +75,7 @@ const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
       const lastActivityMs = new Date(lastActivity).getTime()
       const now = Date.now()
       const diffMs = now - lastActivityMs
-      const diffSec = Math.floor(diffMs / 1000)
-      if (diffSec < 60) return `${diffSec}s`
-      const diffMin = Math.floor(diffSec / 60)
-      if (diffMin < 60) {
-        const remainingSec = diffSec % 60
-        return `${diffMin}m ${remainingSec}s`
-      }
-      // For very old agents, show hours
-      const diffHours = Math.floor(diffMin / 60)
-      const remainingMin = diffMin % 60
-      return `${diffHours}h ${remainingMin}m`
+      return formatDurationUtil(diffMs)
     }
 
     if (isDone && agent.endTime) {
@@ -92,11 +83,7 @@ const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
       const endTime = new Date(agent.endTime).getTime()
       const now = Date.now()
       const diffMs = now - endTime
-      const diffSec = Math.floor(diffMs / 1000)
-      if (diffSec < 60) return `${diffSec}s`
-      const diffMin = Math.floor(diffSec / 60)
-      const remainingSec = diffSec % 60
-      return `${diffMin}m ${remainingSec}s`
+      return formatDurationUtil(diffMs)
     }
 
     // For active agents: show how long they've been working
@@ -106,11 +93,7 @@ const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
     const start = new Date(startTimeSource)
     const end = new Date()
     const diffMs = end - start
-    const diffSec = Math.floor(diffMs / 1000)
-    if (diffSec < 60) return `${diffSec}s`
-    const diffMin = Math.floor(diffSec / 60)
-    const remainingSec = diffSec % 60
-    return `${diffMin}m ${remainingSec}s`
+    return formatDurationUtil(diffMs)
   }
 
   const formatTimestamp = (timestamp) => {

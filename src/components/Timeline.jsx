@@ -1,4 +1,5 @@
 import { useRef, useState, useEffect } from 'react'
+import { getFilteredMarkers as getFilteredMarkersUtil } from '../utils/formatters'
 
 function Timeline({ events, markers, language = 'nl', onZoomChange }) {
   const timelineRef = useRef(null)
@@ -58,36 +59,7 @@ function Timeline({ events, markers, language = 'nl', onZoomChange }) {
 
   // Get filtered markers based on zoom level
   const getFilteredMarkers = () => {
-    if (!markers || markers.length === 0) return []
-
-    const tenMinutes = 10 * 60 * 1000
-    const oneHour = 60 * 60 * 1000
-    const oneDay = 24 * oneHour
-
-    // Use the latest marker as the reference point instead of Date.now()
-    // This ensures filtering works for historical sessions
-    const latestMarkerTime = Math.max(...markers.map(m => new Date(m.timestamp).getTime()))
-
-    switch (zoomLevel) {
-      case '10min':
-        return markers.filter(marker => {
-          const timestamp = new Date(marker.timestamp).getTime()
-          return (latestMarkerTime - timestamp) <= tenMinutes
-        })
-      case 'hour':
-        return markers.filter(marker => {
-          const timestamp = new Date(marker.timestamp).getTime()
-          return (latestMarkerTime - timestamp) <= oneHour
-        })
-      case 'day':
-        return markers.filter(marker => {
-          const timestamp = new Date(marker.timestamp).getTime()
-          return (latestMarkerTime - timestamp) <= oneDay
-        })
-      case 'all':
-      default:
-        return markers
-    }
+    return getFilteredMarkersUtil(markers, zoomLevel)
   }
 
   // Get time range based on zoom level
