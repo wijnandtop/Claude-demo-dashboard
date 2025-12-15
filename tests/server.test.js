@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { parseAgentFile, decodeProjectPath, processAgentFreshness } from '../server/index.js';
+import { parseAgentFile, decodeProjectPath, processAgentFreshness, createSessionCache, readNewLines, processNewLines } from '../server/index.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -356,5 +356,412 @@ describe('processAgentFreshness', () => {
     expect(result[1].isStale).toBe(true);
     expect(result[1].actions).toHaveLength(0);
     expect(result[1].messages).toHaveLength(0);
+  });
+});
+
+describe('createSessionCache', () => {
+  it('should create cache with correct initial structure', () => {
+    const cache = createSessionCache();
+
+    expect(cache.lastByteOffset).toBe(0);
+    expect(cache.orchestrator).toBeNull();
+    expect(cache.agentsMap).toBeInstanceOf(Map);
+    expect(cache.agentsMap.size).toBe(0);
+    expect(cache.markers).toEqual([]);
+    expect(cache.mission).toBeNull();
+    expect(cache.knownAgentIds).toBeInstanceOf(Set);
+    expect(cache.knownAgentIds.size).toBe(0);
+    expect(cache.agentOffsets).toBeInstanceOf(Map);
+    expect(cache.agentOffsets.size).toBe(0);
+  });
+});
+
+describe('readNewLines', () => {
+  const testDir = path.join(__dirname, 'temp');
+
+  beforeEach(() => {
+    if (!fs.existsSync(testDir)) {
+      fs.mkdirSync(testDir, { recursive: true });
+    }
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(testDir)) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should read only new lines from offset', () => {
+    const testFile = path.join(testDir, 'incremental.jsonl');
+    const line1 = JSON.stringify({ type: 'user', message: 'first' });
+    const line2 = JSON.stringify({ type: 'assistant', message: 'second' });
+
+    // Write initial content
+    fs.writeFileSync(testFile, line1 + '\n');
+    const initialSize = fs.statSync(testFile).size;
+
+    // Append new content
+    fs.appendFileSync(testFile, line2 + '\n');
+
+    // Read from initial offset - should only get new line
+    const result = readNewLines(testFile, initialSize);
+
+    expect(result.needsFullReparse).toBe(false);
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0]).toContain('second');
+    expect(result.newOffset).toBeGreaterThan(initialSize);
+  });
+
+  it('should return empty lines when no new data', () => {
+    const testFile = path.join(testDir, 'nochange.jsonl');
+    const content = JSON.stringify({ type: 'user', message: 'test' }) + '\n';
+
+    fs.writeFileSync(testFile, content);
+    const fileSize = fs.statSync(testFile).size;
+
+    const result = readNewLines(testFile, fileSize);
+
+    expect(result.needsFullReparse).toBe(false);
+    expect(result.lines).toHaveLength(0);
+    expect(result.newOffset).toBe(fileSize);
+  });
+
+  it('should signal full reparse when file is truncated', () => {
+    const testFile = path.join(testDir, 'truncated.jsonl');
+    const longContent = JSON.stringify({ type: 'user', message: 'long content here' }) + '\n';
+
+    fs.writeFileSync(testFile, longContent);
+    const originalSize = fs.statSync(testFile).size;
+
+    // Truncate the file
+    fs.writeFileSync(testFile, '{}');
+
+    const result = readNewLines(testFile, originalSize);
+
+    expect(result.needsFullReparse).toBe(true);
+    expect(result.newOffset).toBe(0);
+  });
+
+  it('should read multiple new lines', () => {
+    const testFile = path.join(testDir, 'multiline.jsonl');
+    const line1 = JSON.stringify({ id: 1 });
+
+    fs.writeFileSync(testFile, line1 + '\n');
+    const initialSize = fs.statSync(testFile).size;
+
+    // Append multiple lines
+    const line2 = JSON.stringify({ id: 2 });
+    const line3 = JSON.stringify({ id: 3 });
+    fs.appendFileSync(testFile, line2 + '\n' + line3 + '\n');
+
+    const result = readNewLines(testFile, initialSize);
+
+    expect(result.needsFullReparse).toBe(false);
+    expect(result.lines).toHaveLength(2);
+    expect(JSON.parse(result.lines[0]).id).toBe(2);
+    expect(JSON.parse(result.lines[1]).id).toBe(3);
+  });
+});
+
+describe('processNewLines', () => {
+  it('should detect and track new agent spawn', () => {
+    const cache = createSessionCache();
+    const sessionDir = '/tmp/test';
+
+    const lines = [
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2025-12-15T10:00:00.000Z',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              name: 'Task',
+              id: 'toolu_abc123',
+              input: {
+                subagent_type: 'general-purpose',
+                description: 'Test task'
+              }
+            }
+          ]
+        }
+      })
+    ];
+
+    processNewLines(lines, cache, sessionDir);
+
+    expect(cache.agentsMap.size).toBe(1);
+    expect(cache.agentsMap.has('toolu_abc123')).toBe(true);
+
+    const agent = cache.agentsMap.get('toolu_abc123');
+    expect(agent.name).toBe('general-purpose');
+    expect(agent.currentTask).toBe('Test task');
+    expect(agent.status).toBe('active');
+  });
+
+  it('should track agent completion', () => {
+    const cache = createSessionCache();
+    const sessionDir = '/tmp/test';
+
+    // First spawn the agent
+    cache.agentsMap.set('toolu_abc123', {
+      id: 'toolu_abc123',
+      name: 'general-purpose',
+      status: 'active',
+      currentTask: 'Test',
+      actions: [],
+      messages: [],
+      startTime: '2025-12-15T10:00:00.000Z'
+    });
+
+    // Then complete it
+    const lines = [
+      JSON.stringify({
+        type: 'user',
+        timestamp: '2025-12-15T10:01:00.000Z',
+        toolUseResult: {
+          agentId: 'real123',
+          status: 'completed'
+        },
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_abc123',
+              content: 'Task completed'
+            }
+          ]
+        }
+      })
+    ];
+
+    processNewLines(lines, cache, sessionDir);
+
+    const agent = cache.agentsMap.get('toolu_abc123');
+    expect(agent.status).toBe('done');
+    expect(agent.realAgentId).toBe('real123');
+    expect(cache.knownAgentIds.has('real123')).toBe(true);
+  });
+
+  it('should initialize orchestrator from sessionId', () => {
+    const cache = createSessionCache();
+    const sessionDir = '/tmp/test';
+
+    const lines = [
+      JSON.stringify({
+        type: 'user',
+        sessionId: 'session-uuid-123',
+        timestamp: '2025-12-15T10:00:00.000Z',
+        message: { content: 'Hello' }
+      })
+    ];
+
+    processNewLines(lines, cache, sessionDir);
+
+    expect(cache.orchestrator).not.toBeNull();
+    expect(cache.orchestrator.id).toBe('session-uuid-123');
+    expect(cache.orchestrator.name).toBe('Orchestrator');
+  });
+
+  it('should extract mission from first user message', () => {
+    const cache = createSessionCache();
+    const sessionDir = '/tmp/test';
+
+    const lines = [
+      JSON.stringify({
+        type: 'user',
+        sessionId: 'session-1',
+        timestamp: '2025-12-15T10:00:00.000Z',
+        message: { content: 'Build a dashboard for monitoring' }
+      })
+    ];
+
+    processNewLines(lines, cache, sessionDir);
+
+    expect(cache.mission).toBe('Build a dashboard for monitoring');
+  });
+
+  it('should track file operation markers', () => {
+    const cache = createSessionCache();
+    const sessionDir = '/tmp/test';
+
+    const lines = [
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2025-12-15T10:00:00.000Z',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              name: 'Read',
+              id: 'tool-1',
+              input: { file_path: '/path/to/file.js' }
+            }
+          ]
+        }
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2025-12-15T10:00:01.000Z',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              name: 'Write',
+              id: 'tool-2',
+              input: { file_path: '/path/to/output.js' }
+            }
+          ]
+        }
+      })
+    ];
+
+    processNewLines(lines, cache, sessionDir);
+
+    expect(cache.markers).toHaveLength(2);
+    expect(cache.markers[0].type).toBe('read');
+    expect(cache.markers[0].filename).toBe('file.js');
+    expect(cache.markers[1].type).toBe('write');
+    expect(cache.markers[1].filename).toBe('output.js');
+  });
+
+  it('should limit markers to MAX_MARKERS', () => {
+    const cache = createSessionCache();
+    const sessionDir = '/tmp/test';
+
+    // Pre-fill with 999 markers
+    for (let i = 0; i < 999; i++) {
+      cache.markers.push({ type: 'read', timestamp: `2025-12-15T10:00:${i}.000Z`, file: `/file${i}.js`, filename: `file${i}.js` });
+    }
+
+    // Add 5 more via processNewLines
+    const lines = [];
+    for (let i = 0; i < 5; i++) {
+      lines.push(JSON.stringify({
+        type: 'assistant',
+        timestamp: `2025-12-15T11:00:${i}.000Z`,
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              name: 'Read',
+              id: `tool-new-${i}`,
+              input: { file_path: `/new/file${i}.js` }
+            }
+          ]
+        }
+      }));
+    }
+
+    processNewLines(lines, cache, sessionDir);
+
+    // Should be capped at 1000
+    expect(cache.markers.length).toBe(1000);
+    // Last marker should be from the new batch
+    expect(cache.markers[999].file).toBe('/new/file4.js');
+  });
+
+  it('should update orchestrator goals from TodoWrite', () => {
+    const cache = createSessionCache();
+    cache.orchestrator = {
+      id: 'session-1',
+      name: 'Orchestrator',
+      goals: []
+    };
+    const sessionDir = '/tmp/test';
+
+    const lines = [
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2025-12-15T10:00:00.000Z',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              name: 'TodoWrite',
+              id: 'todo-1',
+              input: {
+                todos: [
+                  { content: 'First task', status: 'completed' },
+                  { content: 'Second task', status: 'in_progress' }
+                ]
+              }
+            }
+          ]
+        }
+      })
+    ];
+
+    processNewLines(lines, cache, sessionDir);
+
+    expect(cache.orchestrator.goals).toHaveLength(2);
+    expect(cache.orchestrator.goals[0].content).toBe('First task');
+    expect(cache.orchestrator.goals[0].status).toBe('completed');
+    expect(cache.orchestrator.goals[1].content).toBe('Second task');
+    expect(cache.orchestrator.goals[1].status).toBe('in_progress');
+  });
+
+  it('should add agent_spawn marker when Task is called', () => {
+    const cache = createSessionCache();
+    const sessionDir = '/tmp/test';
+
+    const lines = [
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2025-12-15T10:00:00.000Z',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              name: 'Task',
+              id: 'toolu_spawn1',
+              input: {
+                subagent_type: 'Explore',
+                description: 'Explore codebase'
+              }
+            }
+          ]
+        }
+      })
+    ];
+
+    processNewLines(lines, cache, sessionDir);
+
+    const spawnMarkers = cache.markers.filter(m => m.type === 'agent_spawn');
+    expect(spawnMarkers).toHaveLength(1);
+    expect(spawnMarkers[0].agentId).toBe('toolu_spawn1');
+    expect(spawnMarkers[0].agentType).toBe('Explore');
+  });
+
+  it('should add agent_complete marker on completion', () => {
+    const cache = createSessionCache();
+    cache.agentsMap.set('toolu_xyz', {
+      id: 'toolu_xyz',
+      name: 'general-purpose',
+      status: 'active'
+    });
+    const sessionDir = '/tmp/test';
+
+    const lines = [
+      JSON.stringify({
+        type: 'user',
+        timestamp: '2025-12-15T10:01:00.000Z',
+        toolUseResult: { status: 'completed' },
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_xyz'
+            }
+          ]
+        }
+      })
+    ];
+
+    processNewLines(lines, cache, sessionDir);
+
+    const completeMarkers = cache.markers.filter(m => m.type === 'agent_complete');
+    expect(completeMarkers).toHaveLength(1);
+    expect(completeMarkers[0].agentId).toBe('toolu_xyz');
   });
 });

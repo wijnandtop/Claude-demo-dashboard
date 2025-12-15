@@ -44,6 +44,187 @@ const AGENT_ACTIVE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 // Progress callback for session parsing (set per-socket during watch)
 let parseProgressCallback = null;
 
+// Session cache for incremental parsing
+const sessionCache = new Map(); // sessionPath → cache object
+
+function createSessionCache() {
+  return {
+    lastByteOffset: 0,
+    orchestrator: null,
+    agentsMap: new Map(),        // tool_use_id → agent data
+    markers: [],
+    mission: null,
+    knownAgentIds: new Set(),    // realAgentIds we're tracking
+    agentOffsets: new Map()      // realAgentId → lastByteOffset for that agent file
+  };
+}
+
+// Read only new lines from a file starting at offset
+function readNewLines(filepath, lastOffset) {
+  const stats = fs.statSync(filepath);
+
+  // File was truncated/replaced - signal full reparse needed
+  if (stats.size < lastOffset) {
+    return { lines: [], newOffset: 0, needsFullReparse: true };
+  }
+
+  // No new data
+  if (stats.size === lastOffset) {
+    return { lines: [], newOffset: lastOffset, needsFullReparse: false };
+  }
+
+  // Read only new bytes
+  const fd = fs.openSync(filepath, 'r');
+  const buffer = Buffer.alloc(stats.size - lastOffset);
+  fs.readSync(fd, buffer, 0, buffer.length, lastOffset);
+  fs.closeSync(fd);
+
+  const newContent = buffer.toString('utf-8');
+  const lines = newContent.trim().split('\n').filter(l => l.trim());
+
+  return { lines, newOffset: stats.size, needsFullReparse: false };
+}
+
+// Process new lines and update cache incrementally
+function processNewLines(lines, cache, sessionDir) {
+  for (const line of lines) {
+    try {
+      const event = JSON.parse(line);
+
+      // Update orchestrator from assistant messages
+      if (event.type === 'assistant' && event.message?.content) {
+        const content = event.message.content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            // Track new agent spawns (Task tool_use)
+            if (block.type === 'tool_use' && block.name === 'Task') {
+              const agentId = block.id;
+              const agentType = block.input?.subagent_type || 'general-purpose';
+              const description = block.input?.description || 'Unknown task';
+
+              cache.agentsMap.set(agentId, {
+                id: agentId,
+                name: agentType,
+                status: 'active',
+                currentTask: description,
+                actions: [],
+                messages: [],
+                startTime: event.timestamp
+              });
+
+              cache.markers.push({
+                timestamp: event.timestamp,
+                type: 'agent_spawn',
+                agentId,
+                agentType
+              });
+            }
+
+            // Update orchestrator thinking/goals
+            if (block.type === 'thinking' && block.thinking && cache.orchestrator) {
+              cache.orchestrator.thinking = block.thinking.substring(0, 300);
+            }
+            if (block.type === 'tool_use' && block.name === 'TodoWrite' && block.input?.todos && cache.orchestrator) {
+              cache.orchestrator.goals = block.input.todos.map(todo => ({
+                content: todo.content,
+                status: todo.status
+              }));
+            }
+
+            // Track file operations as markers
+            if (block.type === 'tool_use') {
+              const filePath = block.input?.file_path || block.input?.path;
+              if (filePath && ['Read', 'Write', 'Edit'].includes(block.name)) {
+                cache.markers.push({
+                  timestamp: event.timestamp,
+                  type: block.name.toLowerCase(),
+                  file: filePath,
+                  filename: path.basename(filePath)
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // Track agent completion and realAgentId mapping
+      if (event.type === 'user' && event.message?.content) {
+        const content = event.message.content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block.type === 'tool_result' && block.tool_use_id) {
+              const agent = cache.agentsMap.get(block.tool_use_id);
+              if (agent) {
+                // Map realAgentId when we receive it
+                if (event.toolUseResult?.agentId) {
+                  agent.realAgentId = event.toolUseResult.agentId;
+                  cache.knownAgentIds.add(event.toolUseResult.agentId);
+
+                  // Try to parse agent file if it exists
+                  const agentFilePath = path.join(sessionDir, `agent-${event.toolUseResult.agentId}.jsonl`);
+                  if (fs.existsSync(agentFilePath)) {
+                    const agentData = parseAgentFile(agentFilePath);
+                    if (agentData) {
+                      agent.actions = agentData.actions;
+                      agent.messages = agentData.messages;
+                      cache.agentOffsets.set(event.toolUseResult.agentId, fs.statSync(agentFilePath).size);
+                    }
+                  }
+                }
+
+                // Track completion
+                if (event.toolUseResult?.status === 'completed') {
+                  agent.status = 'done';
+                  agent.endTime = event.timestamp;
+
+                  cache.markers.push({
+                    timestamp: event.timestamp,
+                    type: 'agent_complete',
+                    agentId: block.tool_use_id,
+                    agentType: agent.name
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Extract mission from first user message
+      if (!cache.mission && event.type === 'user' && event.message?.content) {
+        const content = event.message.content;
+        if (typeof content === 'string' && !event.isMeta && !content.includes('Caveat:') && !content.startsWith('<')) {
+          cache.mission = content.substring(0, 500);
+        }
+      }
+
+      // Initialize orchestrator if needed
+      if (event.sessionId && !cache.orchestrator) {
+        cache.orchestrator = {
+          id: event.sessionId,
+          name: 'Orchestrator',
+          status: 'active',
+          currentTask: 'Coordinating agents...',
+          activeAgents: 0,
+          tasksCompleted: 0,
+          mission: cache.mission,
+          goals: [],
+          thinking: null
+        };
+      }
+
+    } catch (e) {
+      // Skip unparseable lines
+    }
+  }
+
+  // Limit markers
+  const MAX_MARKERS = 1000;
+  if (cache.markers.length > MAX_MARKERS) {
+    cache.markers = cache.markers.slice(-MAX_MARKERS);
+  }
+}
+
 app.use(cors());
 app.use(express.json());
 
@@ -989,6 +1170,26 @@ io.on('connection', (socket) => {
       ...state
     });
 
+    // Initialize cache for incremental updates
+    const cache = createSessionCache();
+    cache.orchestrator = state.orchestrator;
+    cache.markers = state.markers;
+    cache.mission = state.orchestrator?.mission;
+    cache.lastByteOffset = fs.statSync(sessionPath).size;
+
+    for (const agent of state.agents) {
+      cache.agentsMap.set(agent.id, agent);
+      if (agent.realAgentId) {
+        cache.knownAgentIds.add(agent.realAgentId);
+        const agentFilePath = path.join(sessionDir, `agent-${agent.realAgentId}.jsonl`);
+        if (fs.existsSync(agentFilePath)) {
+          cache.agentOffsets.set(agent.realAgentId, fs.statSync(agentFilePath).size);
+        }
+      }
+    }
+
+    sessionCache.set(sessionPath, cache);
+
     // Watch for changes to both the session file and any agent files in the directory
     socketWatcher = chokidar.watch([
       sessionPath,
@@ -1009,15 +1210,119 @@ io.on('connection', (socket) => {
 
       clearTimeout(updateDebounceTimer);
       updateDebounceTimer = setTimeout(() => {
-        console.log(`Processing ${pendingChanges.size} batched changes`);
+        let cache = sessionCache.get(socketSessionPath);
 
-        // Just parse once and send update
-        const newState = parseSession(socketSessionPath);
-        socket.emit('update', {
-          sessionId: socketSessionPath,
-          type: 'update',
-          ...newState
-        });
+        // Initialize cache on first change if needed
+        if (!cache) {
+          console.log('[Incremental] No cache, doing full parse');
+          const fullState = parseSession(socketSessionPath);
+          cache = createSessionCache();
+          cache.orchestrator = fullState.orchestrator;
+          cache.markers = fullState.markers;
+          cache.mission = fullState.orchestrator?.mission;
+          cache.lastByteOffset = fs.statSync(socketSessionPath).size;
+
+          // Populate agentsMap from full parse
+          for (const agent of fullState.agents) {
+            cache.agentsMap.set(agent.id, agent);
+            if (agent.realAgentId) {
+              cache.knownAgentIds.add(agent.realAgentId);
+            }
+          }
+
+          sessionCache.set(socketSessionPath, cache);
+
+          socket.emit('update', {
+            sessionId: socketSessionPath,
+            type: 'update',
+            ...fullState
+          });
+          pendingChanges.clear();
+          return;
+        }
+
+        const sessionDir = path.dirname(socketSessionPath);
+        let hasUpdates = false;
+
+        // Check if main session file changed
+        if (pendingChanges.has(socketSessionPath)) {
+          const { lines, newOffset, needsFullReparse } = readNewLines(socketSessionPath, cache.lastByteOffset);
+
+          if (needsFullReparse) {
+            console.log('[Incremental] File truncated, doing full reparse');
+            sessionCache.delete(socketSessionPath);
+            const fullState = parseSession(socketSessionPath);
+            socket.emit('update', { sessionId: socketSessionPath, type: 'update', ...fullState });
+            pendingChanges.clear();
+            return;
+          }
+
+          if (lines.length > 0) {
+            console.log(`[Incremental] Processing ${lines.length} new lines from main session`);
+            processNewLines(lines, cache, sessionDir);
+            cache.lastByteOffset = newOffset;
+            hasUpdates = true;
+          }
+        }
+
+        // Check agent file changes - only for known agents
+        for (const changedFile of pendingChanges) {
+          if (changedFile.includes('agent-') && changedFile.endsWith('.jsonl')) {
+            const match = changedFile.match(/agent-([a-f0-9]+)\.jsonl$/);
+            if (match) {
+              const realAgentId = match[1];
+
+              // Only process if we know this agent
+              if (cache.knownAgentIds.has(realAgentId)) {
+                const lastOffset = cache.agentOffsets.get(realAgentId) || 0;
+                const { lines, newOffset, needsFullReparse } = readNewLines(changedFile, lastOffset);
+
+                if (needsFullReparse || lines.length > 0) {
+                  console.log(`[Incremental] Updating agent ${realAgentId}`);
+
+                  // Find the agent in our map and update it
+                  for (const [toolUseId, agent] of cache.agentsMap.entries()) {
+                    if (agent.realAgentId === realAgentId) {
+                      // Re-parse the agent file to get updated data
+                      const agentData = parseAgentFile(changedFile);
+                      if (agentData) {
+                        agent.actions = agentData.actions;
+                        agent.messages = agentData.messages;
+                        if (agentData.isCompleted && agent.status !== 'done') {
+                          agent.status = 'done';
+                        }
+                      }
+                      break;
+                    }
+                  }
+
+                  cache.agentOffsets.set(realAgentId, newOffset);
+                  hasUpdates = true;
+                }
+              }
+            }
+          }
+        }
+
+        if (hasUpdates) {
+          // Build state from cache
+          const agents = processAgentFreshness(Array.from(cache.agentsMap.values()));
+
+          if (cache.orchestrator) {
+            cache.orchestrator.activeAgents = agents.filter(a => a.status === 'active').length;
+            cache.orchestrator.tasksCompleted = agents.filter(a => a.status === 'done').length;
+            cache.orchestrator.mission = cache.mission;
+          }
+
+          socket.emit('update', {
+            sessionId: socketSessionPath,
+            type: 'update',
+            agents,
+            orchestrator: cache.orchestrator,
+            markers: cache.markers,
+            events: []
+          });
+        }
 
         pendingChanges.clear();
       }, 200);
@@ -1077,6 +1382,10 @@ io.on('connection', (socket) => {
       socketWatcher.close();
       socketWatcher = null;
     }
+    // Clean up session cache
+    if (socketSessionPath) {
+      sessionCache.delete(socketSessionPath);
+    }
   });
 });
 
@@ -1089,4 +1398,4 @@ if (process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true') {
 }
 
 // Export for testing
-export { parseAgentFile, parseAgentFileSmart, decodeProjectPath, processAgentFreshness };
+export { parseAgentFile, parseAgentFileSmart, decodeProjectPath, processAgentFreshness, createSessionCache, readNewLines, processNewLines };
