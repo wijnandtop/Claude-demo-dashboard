@@ -38,6 +38,12 @@ const narrationCache = new Map();
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_MARKERS = 1000;
 
+// Smart agent file parsing
+const AGENT_ACTIVE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+// Progress callback for session parsing (set per-socket during watch)
+let parseProgressCallback = null;
+
 app.use(cors());
 app.use(express.json());
 
@@ -111,6 +117,57 @@ function parseAgentFile(agentFilePath) {
   }
 
   return { agentId, actions, messages, isCompleted, lastStopReason };
+}
+
+// Smart agent file parsing - optimized for inactive agents
+function parseAgentFileSmart(agentFilePath) {
+  const stats = fs.statSync(agentFilePath);
+  const mtime = stats.mtime.getTime();
+  const now = Date.now();
+  const isActive = (now - mtime) < AGENT_ACTIVE_WINDOW_MS;
+
+  if (isActive) {
+    // Full parse for active agents
+    return parseAgentFile(agentFilePath);
+  }
+
+  // Partial parse for inactive agents
+  console.log(`[Smart Parse] Agent file ${path.basename(agentFilePath)} inactive (${Math.floor((now - mtime) / 60000)}min old), using partial parse`);
+
+  const content = fs.readFileSync(agentFilePath, 'utf-8');
+  const lines = content.trim().split('\n');
+
+  // Only process first 50 and last 20 lines
+  const firstLines = lines.slice(0, 50);
+  const lastLines = lines.slice(-20);
+  const linesToParse = [...new Set([...firstLines, ...lastLines])]; // dedupe if overlap
+
+  let agentId = null;
+  let lastStopReason = null;
+
+  for (const line of linesToParse) {
+    if (!line.trim()) continue;
+    try {
+      const record = JSON.parse(line);
+      if (!agentId && record.agentId) {
+        agentId = record.agentId;
+      }
+      if (record.type === 'assistant' && record.message?.stop_reason) {
+        lastStopReason = record.message.stop_reason;
+      }
+    } catch (e) {
+      // Skip unparseable lines
+    }
+  }
+
+  return {
+    agentId,
+    actions: [],
+    messages: [],
+    isCompleted: lastStopReason === 'end_turn',
+    lastStopReason,
+    isPartialParse: true
+  };
 }
 
 // Process agents based on freshness
@@ -461,9 +518,21 @@ function parseSession(filepath) {
   console.log(`Agents in map with realAgentId:`, Array.from(agentsMap.entries()).filter(([k,v]) => v.realAgentId).map(([k,v]) => ({ toolUseId: k.substring(0,15), realAgentId: v.realAgentId })));
 
   // Parse each agent file and match to agents in agentsMap
-  for (const agentFile of agentFiles) {
+  for (let i = 0; i < agentFiles.length; i++) {
+    const agentFile = agentFiles[i];
+
+    // Emit progress if callback is set
+    if (parseProgressCallback) {
+      parseProgressCallback({
+        phase: 'agents',
+        current: i + 1,
+        total: agentFiles.length,
+        status: `Analyzing agent ${i + 1} of ${agentFiles.length}...`
+      });
+    }
+
     const agentFilePath = path.join(sessionDir, agentFile);
-    const agentData = parseAgentFile(agentFilePath);
+    const agentData = parseAgentFileSmart(agentFilePath);
 
     if (agentData && agentData.agentId) {
       console.log(`Processing agent file with agentId: ${agentData.agentId}`);
@@ -884,15 +953,41 @@ io.on('connection', (socket) => {
 
     socketSessionPath = sessionPath;
 
+    // Emit that we're starting to parse
+    socket.emit('parseProgress', { phase: 'starting', status: 'Starting session analysis...' });
+
+    // Get session directory and scan for agent files first (to know total count)
+    const sessionDir = path.dirname(sessionPath);
+    const agentFiles = fs.existsSync(sessionDir)
+      ? fs.readdirSync(sessionDir).filter(f => f.startsWith('agent-') && f.endsWith('.jsonl'))
+      : [];
+
+    // Emit agent count
+    socket.emit('parseProgress', {
+      phase: 'agents',
+      current: 0,
+      total: agentFiles.length,
+      status: `Found ${agentFiles.length} agent files to analyze...`
+    });
+
+    // Set progress callback
+    parseProgressCallback = (progress) => {
+      socket.emit('parseProgress', progress);
+    };
+
     // Send initial state
     const state = parseSession(sessionPath);
+
+    // Clear callback
+    parseProgressCallback = null;
+
+    // Emit completion
+    socket.emit('parseProgress', { phase: 'done', status: 'Analysis complete' });
+
     socket.emit('update', {
       sessionId: sessionPath,
       ...state
     });
-
-    // Get the directory to watch for agent files
-    const sessionDir = path.dirname(sessionPath);
 
     // Watch for changes to both the session file and any agent files in the directory
     socketWatcher = chokidar.watch([
@@ -994,4 +1089,4 @@ if (process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true') {
 }
 
 // Export for testing
-export { parseAgentFile, decodeProjectPath, processAgentFreshness };
+export { parseAgentFile, parseAgentFileSmart, decodeProjectPath, processAgentFreshness };

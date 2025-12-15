@@ -40,6 +40,7 @@ function App() {
   const [markers, setMarkers] = useState([])
   const [socket, setSocket] = useState(null)
   const [timelineZoom, setTimelineZoom] = useState('hour') // '10min', 'hour', 'day', 'all'
+  const [loadingProgress, setLoadingProgress] = useState(null)
 
   // Track the current session for reconnect handling
   const currentSessionRef = useRef(currentSession)
@@ -168,6 +169,16 @@ function App() {
       )
     })
 
+    newSocket.on('parseProgress', (progress) => {
+      console.log('Parse progress:', progress)
+      setLoadingProgress(progress)
+
+      // Clear progress when done
+      if (progress.phase === 'done') {
+        setTimeout(() => setLoadingProgress(null), 500)
+      }
+    })
+
     newSocket.on('apiStatus', (data) => {
       setApiKeyMissing(!data.keyConfigured)
     })
@@ -179,6 +190,7 @@ function App() {
     setSocket(newSocket)
 
     return () => {
+      newSocket.off('parseProgress')
       newSocket.close()
     }
   }, [])
@@ -429,6 +441,20 @@ function App() {
           {' '}<a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer">
             {language === 'nl' ? 'Haal key op' : 'Get key'}
           </a>
+        </div>
+      )}
+
+      {loadingProgress && loadingProgress.phase !== 'done' && (
+        <div className="loading-progress">
+          <div className="loading-progress-text">{loadingProgress.status}</div>
+          {loadingProgress.total > 0 && (
+            <div className="loading-progress-bar">
+              <div
+                className="loading-progress-fill"
+                style={{ width: `${(loadingProgress.current / loadingProgress.total) * 100}%` }}
+              />
+            </div>
+          )}
         </div>
       )}
 
