@@ -1,4 +1,4 @@
-import { useEffect, useRef, memo, useState } from 'react'
+import { useEffect, memo, useState } from 'react'
 import { formatDuration as formatDurationUtil } from '../utils/formatters'
 
 const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
@@ -6,8 +6,6 @@ const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
   const avatarUrl = `https://api.dicebear.com/7.x/bottts/svg?seed=${avatarSeed}`
   const isDone = agent.status === 'done'
   const isStale = agent.isStale || agent.status === 'stale'
-  const messagesEndRef = useRef(null)
-  const actionsEndRef = useRef(null)
 
   // Re-render every 30 seconds to update duration display (reduces CPU usage)
   const [, setTick] = useState(0)
@@ -113,19 +111,6 @@ const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
     return iconMap[actionName] || '\u{1F4DD}'
   }
 
-  // Auto-scroll to bottom when new messages or actions arrive
-  useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [agent.messages])
-
-  useEffect(() => {
-    if (actionsEndRef.current) {
-      actionsEndRef.current.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [agent.actions])
-
   // Collapsed view for done agents (but show full view if recently completed)
   // Also show collapsed view for stale agents
   const shouldShowCollapsed = isStale || (isDone && !isRecentlyDone())
@@ -207,7 +192,6 @@ const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
                   <span className="message-text">{message.text}</span>
                 </div>
               ))}
-              <div ref={messagesEndRef} />
             </div>
           </div>
         )}
@@ -228,7 +212,6 @@ const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
                   <span className="action-timestamp">{formatTimestamp(action.timestamp)}</span>
                 </div>
               ))}
-              <div ref={actionsEndRef} />
             </div>
           </div>
         )}
