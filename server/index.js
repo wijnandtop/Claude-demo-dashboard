@@ -395,6 +395,10 @@ function processAgentFreshness(agents) {
     }
 
     if (isStale) {
+      // DON'T clear actions/messages for agents that are still potentially active
+      // (no endTime means the agent might still be running)
+      const keepFullData = agent.status !== 'done' && !agent.endTime;
+
       // Return minimal agent info for stale agents (collapsed view)
       return {
         id: agent.id,
@@ -407,9 +411,9 @@ function processAgentFreshness(agents) {
         firstActivityTime: agent.firstActivityTime,
         realAgentId: agent.realAgentId,
         isStale: true,
-        // Clear history to save memory
-        actions: [],
-        messages: []
+        // Keep actions/messages for potentially active agents
+        actions: keepFullData ? agent.actions : [],
+        messages: keepFullData ? agent.messages : []
       };
     }
 
@@ -1265,40 +1269,60 @@ io.on('connection', (socket) => {
           }
         }
 
-        // Check agent file changes - only for known agents
+        // Check agent file changes - process ALL agent files
         for (const changedFile of pendingChanges) {
           if (changedFile.includes('agent-') && changedFile.endsWith('.jsonl')) {
             const match = changedFile.match(/agent-([a-f0-9]+)\.jsonl$/);
             if (match) {
               const realAgentId = match[1];
 
-              // Only process if we know this agent
-              if (cache.knownAgentIds.has(realAgentId)) {
-                const lastOffset = cache.agentOffsets.get(realAgentId) || 0;
-                const { lines, newOffset, needsFullReparse } = readNewLines(changedFile, lastOffset);
+              // Add to known agents if new
+              if (!cache.knownAgentIds.has(realAgentId)) {
+                cache.knownAgentIds.add(realAgentId);
+                console.log(`[Incremental] Discovered new agent file: ${realAgentId}`);
+              }
 
-                if (needsFullReparse || lines.length > 0) {
-                  console.log(`[Incremental] Updating agent ${realAgentId}`);
+              // Always process agent file changes
+              console.log(`[Incremental] Updating agent ${realAgentId}`);
 
-                  // Find the agent in our map and update it
-                  for (const [toolUseId, agent] of cache.agentsMap.entries()) {
-                    if (agent.realAgentId === realAgentId) {
-                      // Re-parse the agent file to get updated data
-                      const agentData = parseAgentFile(changedFile);
-                      if (agentData) {
-                        agent.actions = agentData.actions;
-                        agent.messages = agentData.messages;
-                        if (agentData.isCompleted && agent.status !== 'done') {
-                          agent.status = 'done';
-                        }
-                      }
-                      break;
-                    }
-                  }
-
-                  cache.agentOffsets.set(realAgentId, newOffset);
-                  hasUpdates = true;
+              // Find matching agent in cache by realAgentId, or create placeholder
+              let matchedAgent = null;
+              for (const [toolUseId, agent] of cache.agentsMap.entries()) {
+                if (agent.realAgentId === realAgentId) {
+                  matchedAgent = agent;
+                  break;
                 }
+              }
+
+              // Parse the agent file
+              const agentData = parseAgentFile(changedFile);
+
+              if (agentData) {
+                if (matchedAgent) {
+                  // Update existing agent
+                  matchedAgent.actions = agentData.actions;
+                  matchedAgent.messages = agentData.messages;
+                  if (agentData.isCompleted && matchedAgent.status !== 'done') {
+                    matchedAgent.status = 'done';
+                  }
+                } else {
+                  // Create new agent entry (we have the file but no mapping yet)
+                  // Use realAgentId as temporary key
+                  const tempAgent = {
+                    id: `temp-${realAgentId}`,
+                    name: 'agent',
+                    status: agentData.isCompleted ? 'done' : 'active',
+                    currentTask: 'Agent task',
+                    actions: agentData.actions,
+                    messages: agentData.messages,
+                    realAgentId: realAgentId,
+                    startTime: agentData.actions[0]?.timestamp || agentData.messages[0]?.timestamp || new Date().toISOString()
+                  };
+                  cache.agentsMap.set(`temp-${realAgentId}`, tempAgent);
+                }
+
+                cache.agentOffsets.set(realAgentId, fs.statSync(changedFile).size);
+                hasUpdates = true;
               }
             }
           }

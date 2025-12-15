@@ -281,7 +281,8 @@ describe('processAgentFreshness', () => {
     expect(result).toHaveLength(1);
     expect(result[0].isStale).toBe(true);
     expect(result[0].status).toBe('stale'); // Status changed from active to stale
-    expect(result[0].actions).toHaveLength(0);
+    // Keep actions for agents without endTime (potentially still running)
+    expect(result[0].actions).toHaveLength(1);
   });
 
   it('should keep active agents with recent activity fresh', () => {
