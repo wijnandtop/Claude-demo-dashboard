@@ -41,6 +41,7 @@ function App() {
   const [socket, setSocket] = useState(null)
   const [timelineZoom, setTimelineZoom] = useState('hour') // '10min', 'hour', 'day', 'all'
   const [loadingProgress, setLoadingProgress] = useState(null)
+  const [isLoadingSession, setIsLoadingSession] = useState(false)
 
   // Track the current session for reconnect handling
   const currentSessionRef = useRef(currentSession)
@@ -127,6 +128,11 @@ function App() {
       setAgents(data.agents || [])
       setOrchestrator(data.orchestrator || null)
       setMarkers(data.markers || [])
+
+      // Clear loading state when we receive orchestrator data
+      if (data.orchestrator) {
+        setIsLoadingSession(false)
+      }
 
       // Add to events timeline
       if (data.markers) {
@@ -246,6 +252,7 @@ function App() {
   }, [agents, orchestrator, socket, narratorMode, language])
 
   const handleSessionSelect = (sessionId) => {
+    setIsLoadingSession(true)
     setCurrentSession(sessionId)
     setAgents([])
     setOrchestrator(null)
@@ -375,12 +382,14 @@ function App() {
   }
 
   // Split agents into active and inactive groups
-  // Active: agents with status 'active' OR recently completed (within 5 minutes)
+  // Active: agents with status 'active' OR recently completed (within 5 minutes) AND not stale
   // Inactive: agents that are done/stale AND NOT recently completed
   const { activeAgents, inactiveAgents } = useMemo(() => {
     return sortedAgents.reduce(
       (acc, agent) => {
-        const isActive = agent.status === 'active' || isRecentlyDone(agent)
+        // Agent is active if: status is 'active' AND not stale, OR recently done AND not stale
+        // This matches the collapse logic in Agent.jsx
+        const isActive = !agent.isStale && (agent.status === 'active' || isRecentlyDone(agent))
         if (isActive) {
           acc.activeAgents.push(agent)
         } else {
@@ -460,7 +469,24 @@ function App() {
 
       <main className="app-main">
         <section className="orchestrator-section">
-          {orchestrator ? (
+          {isLoadingSession ? (
+            <div className="orchestrator-placeholder loading">
+              <p>{language === 'nl' ? 'Sessie laden...' : 'Loading session...'}</p>
+              {loadingProgress && loadingProgress.phase !== 'done' && (
+                <div className="loading-progress-inline">
+                  <div className="loading-progress-text">{loadingProgress.status}</div>
+                  {loadingProgress.total > 0 && (
+                    <div className="loading-progress-bar">
+                      <div
+                        className="loading-progress-fill"
+                        style={{ width: `${(loadingProgress.current / loadingProgress.total) * 100}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : orchestrator ? (
             <Orchestrator
               data={orchestrator}
               narratorMode={narratorMode}
