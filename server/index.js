@@ -36,6 +36,7 @@ const PORT = 3001;
 // Cache key format: `${text}::${language}`
 const narrationCache = new Map();
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_MARKERS = 1000;
 
 app.use(cors());
 app.use(express.json());
@@ -589,7 +590,12 @@ function parseSession(filepath) {
     }
   }
 
-  return { events, agents, orchestrator, markers };
+  // Limit markers to most recent MAX_MARKERS
+  const limitedMarkers = markers.length > MAX_MARKERS
+    ? markers.slice(-MAX_MARKERS)
+    : markers;
+
+  return { events: [], agents, orchestrator, markers: limitedMarkers };
 }
 
 // Narrate using Haiku (optional)
@@ -686,7 +692,7 @@ app.get('/api/session', async (req, res) => {
       agents,
       orchestrator,
       markers,
-      events
+      events: []
     });
   } catch (error) {
     console.error('Error loading session:', error);
@@ -906,99 +912,17 @@ io.on('connection', (socket) => {
       console.log('File changed:', changedPath);
       pendingChanges.add(changedPath);
 
-      // Debounce: wait 200ms before processing
       clearTimeout(updateDebounceTimer);
       updateDebounceTimer = setTimeout(() => {
         console.log(`Processing ${pendingChanges.size} batched changes`);
 
-        // Check if any agent file needs filtering
-        let shouldProcess = true;
-        for (const path of pendingChanges) {
-          if (path.includes('agent-') && path.endsWith('.jsonl')) {
-            // Parse the main session to get ALL agents (UNFILTERED)
-            // We need the unfiltered list to properly check agent status
-            const sessionDir = path.dirname(socketSessionPath);
-            const content = fs.readFileSync(socketSessionPath, 'utf-8');
-            const lines = content.trim().split('\n');
-
-            // Build a map of ALL agents from the session file
-            const agentsMap = new Map();
-
-            for (const line of lines) {
-              if (!line.trim()) continue;
-              try {
-                const event = JSON.parse(line);
-
-                // Track Task tool calls (agent spawns)
-                if (event.type === 'assistant' && event.message?.content) {
-                  const content = event.message.content;
-                  if (Array.isArray(content)) {
-                    for (const block of content) {
-                      if (block.type === 'tool_use' && block.name === 'Task') {
-                        const agentId = block.id;
-                        agentsMap.set(agentId, {
-                          id: agentId,
-                          status: 'active',
-                          startTime: event.timestamp
-                        });
-                      }
-                    }
-                  }
-                }
-
-                // Track agent completion and realAgentId mapping
-                if (event.type === 'user' && event.message?.content) {
-                  const content = event.message.content;
-                  if (Array.isArray(content)) {
-                    for (const block of content) {
-                      if (block.type === 'tool_result' && block.tool_use_id) {
-                        const agent = agentsMap.get(block.tool_use_id);
-                        if (agent) {
-                          // Map realAgentId
-                          if (event.toolUseResult?.agentId) {
-                            agent.realAgentId = event.toolUseResult.agentId;
-                          }
-
-                          // Track completion
-                          const isCompleted = event.toolUseResult?.status === 'completed';
-                          if (isCompleted) {
-                            agent.status = 'done';
-                            agent.endTime = event.timestamp;
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              } catch (e) {
-                // Skip unparseable lines
-              }
-            }
-
-            // Check if this agent file change should trigger an update
-            if (!shouldProcessAgentFileChange(path, agentsMap)) {
-              console.log('[Watcher] Skipping update for stale agent file:', path);
-              shouldProcess = false;
-              break; // If any agent file is stale, skip entire batch
-            }
-          }
-        }
-
-        if (shouldProcess) {
-          // Process the update
-          const newState = parseSession(socketSessionPath);
-          console.log('[Watcher] Sending update with agents:', newState.agents?.map(a => ({
-            id: a.id?.substring(0, 15),
-            realAgentId: a.realAgentId,
-            actions: a.actions?.length || 0,
-            messages: a.messages?.length || 0
-          })));
-          socket.emit('update', {
-            sessionId: socketSessionPath,
-            type: 'update',
-            ...newState
-          });
-        }
+        // Just parse once and send update
+        const newState = parseSession(socketSessionPath);
+        socket.emit('update', {
+          sessionId: socketSessionPath,
+          type: 'update',
+          ...newState
+        });
 
         pendingChanges.clear();
       }, 200);
