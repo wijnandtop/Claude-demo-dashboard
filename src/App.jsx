@@ -6,6 +6,8 @@ import SessionSelector from './components/SessionSelector'
 import Timeline from './components/Timeline'
 import { getZoomWindowMs } from './utils/formatters'
 
+const MAX_EVENTS = 5000
+
 function App() {
   // Get session from URL query parameter - used for initial state
   const getSessionFromUrl = () => {
@@ -131,7 +133,16 @@ function App() {
           const newEvents = data.markers.filter(m =>
             !prev.some(p => p.timestamp === m.timestamp && p.type === m.type)
           )
-          return [...prev, ...newEvents]
+
+          const combined = [...prev, ...newEvents]
+
+          // Cap at MAX_EVENTS to prevent memory leak
+          if (combined.length > MAX_EVENTS) {
+            // Drop oldest events
+            return combined.slice(combined.length - MAX_EVENTS)
+          }
+
+          return combined
         })
       }
     })

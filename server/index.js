@@ -898,91 +898,110 @@ io.on('connection', (socket) => {
       interval: 500
     });
 
+    // Debounce timer and pending changes set
+    let updateDebounceTimer = null;
+    let pendingChanges = new Set();
+
     socketWatcher.on('change', (changedPath) => {
       console.log('File changed:', changedPath);
+      pendingChanges.add(changedPath);
 
-      // If an agent file changed, check if we should process it
-      if (changedPath.includes('agent-') && changedPath.endsWith('.jsonl')) {
-        // Parse the main session to get ALL agents (UNFILTERED)
-        // We need the unfiltered list to properly check agent status
-        const sessionDir = path.dirname(socketSessionPath);
-        const content = fs.readFileSync(socketSessionPath, 'utf-8');
-        const lines = content.trim().split('\n');
+      // Debounce: wait 200ms before processing
+      clearTimeout(updateDebounceTimer);
+      updateDebounceTimer = setTimeout(() => {
+        console.log(`Processing ${pendingChanges.size} batched changes`);
 
-        // Build a map of ALL agents from the session file
-        const agentsMap = new Map();
+        // Check if any agent file needs filtering
+        let shouldProcess = true;
+        for (const path of pendingChanges) {
+          if (path.includes('agent-') && path.endsWith('.jsonl')) {
+            // Parse the main session to get ALL agents (UNFILTERED)
+            // We need the unfiltered list to properly check agent status
+            const sessionDir = path.dirname(socketSessionPath);
+            const content = fs.readFileSync(socketSessionPath, 'utf-8');
+            const lines = content.trim().split('\n');
 
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line);
+            // Build a map of ALL agents from the session file
+            const agentsMap = new Map();
 
-            // Track Task tool calls (agent spawns)
-            if (event.type === 'assistant' && event.message?.content) {
-              const content = event.message.content;
-              if (Array.isArray(content)) {
-                for (const block of content) {
-                  if (block.type === 'tool_use' && block.name === 'Task') {
-                    const agentId = block.id;
-                    agentsMap.set(agentId, {
-                      id: agentId,
-                      status: 'active',
-                      startTime: event.timestamp
-                    });
-                  }
-                }
-              }
-            }
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const event = JSON.parse(line);
 
-            // Track agent completion and realAgentId mapping
-            if (event.type === 'user' && event.message?.content) {
-              const content = event.message.content;
-              if (Array.isArray(content)) {
-                for (const block of content) {
-                  if (block.type === 'tool_result' && block.tool_use_id) {
-                    const agent = agentsMap.get(block.tool_use_id);
-                    if (agent) {
-                      // Map realAgentId
-                      if (event.toolUseResult?.agentId) {
-                        agent.realAgentId = event.toolUseResult.agentId;
-                      }
-
-                      // Track completion
-                      const isCompleted = event.toolUseResult?.status === 'completed';
-                      if (isCompleted) {
-                        agent.status = 'done';
-                        agent.endTime = event.timestamp;
+                // Track Task tool calls (agent spawns)
+                if (event.type === 'assistant' && event.message?.content) {
+                  const content = event.message.content;
+                  if (Array.isArray(content)) {
+                    for (const block of content) {
+                      if (block.type === 'tool_use' && block.name === 'Task') {
+                        const agentId = block.id;
+                        agentsMap.set(agentId, {
+                          id: agentId,
+                          status: 'active',
+                          startTime: event.timestamp
+                        });
                       }
                     }
                   }
                 }
+
+                // Track agent completion and realAgentId mapping
+                if (event.type === 'user' && event.message?.content) {
+                  const content = event.message.content;
+                  if (Array.isArray(content)) {
+                    for (const block of content) {
+                      if (block.type === 'tool_result' && block.tool_use_id) {
+                        const agent = agentsMap.get(block.tool_use_id);
+                        if (agent) {
+                          // Map realAgentId
+                          if (event.toolUseResult?.agentId) {
+                            agent.realAgentId = event.toolUseResult.agentId;
+                          }
+
+                          // Track completion
+                          const isCompleted = event.toolUseResult?.status === 'completed';
+                          if (isCompleted) {
+                            agent.status = 'done';
+                            agent.endTime = event.timestamp;
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              } catch (e) {
+                // Skip unparseable lines
               }
             }
-          } catch (e) {
-            // Skip unparseable lines
+
+            // Check if this agent file change should trigger an update
+            if (!shouldProcessAgentFileChange(path, agentsMap)) {
+              console.log('[Watcher] Skipping update for stale agent file:', path);
+              shouldProcess = false;
+              break; // If any agent file is stale, skip entire batch
+            }
           }
         }
 
-        // Check if this agent file change should trigger an update
-        if (!shouldProcessAgentFileChange(changedPath, agentsMap)) {
-          console.log('[Watcher] Skipping update for stale agent file:', changedPath);
-          return; // Ignore changes to old agent files
+        if (shouldProcess) {
+          // Process the update
+          const newState = parseSession(socketSessionPath);
+          console.log('[Watcher] Sending update with agents:', newState.agents?.map(a => ({
+            id: a.id?.substring(0, 15),
+            realAgentId: a.realAgentId,
+            actions: a.actions?.length || 0,
+            messages: a.messages?.length || 0
+          })));
+          socket.emit('update', {
+            sessionId: socketSessionPath,
+            type: 'update',
+            ...newState
+          });
         }
-      }
 
-      // Process the update
-      const newState = parseSession(socketSessionPath);
-      console.log('[Watcher] Sending update with agents:', newState.agents?.map(a => ({
-        id: a.id?.substring(0, 15),
-        realAgentId: a.realAgentId,
-        actions: a.actions?.length || 0,
-        messages: a.messages?.length || 0
-      })));
-      socket.emit('update', {
-        sessionId: socketSessionPath,
-        type: 'update',
-        ...newState
-      });
+        pendingChanges.clear();
+      }, 200);
     });
 
     // Watch for new agent files being created

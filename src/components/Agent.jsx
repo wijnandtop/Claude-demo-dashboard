@@ -9,14 +9,14 @@ const Agent = memo(function Agent({ agent, narratorMode, language = 'nl' }) {
   const messagesEndRef = useRef(null)
   const actionsEndRef = useRef(null)
 
-  // Force re-render every second to update duration display and check collapse timing
+  // Re-render every 30 seconds to update duration display (reduces CPU usage)
   const [, setTick] = useState(0)
   useEffect(() => {
     if (!isDone && !isStale) return // Only need interval for done/stale agents
 
     const interval = setInterval(() => {
       setTick(t => t + 1)
-    }, 1000)
+    }, 30000)
 
     return () => clearInterval(interval)
   }, [isDone, isStale])
