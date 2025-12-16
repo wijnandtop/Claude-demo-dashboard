@@ -35,6 +35,12 @@ function App() {
     return stored || 'system'
   })
   const [apiKeyMissing, setApiKeyMissing] = useState(false)
+  const [narrationStatus, setNarrationStatus] = useState({
+    keyConfigured: true,
+    successRate: 1,
+    lastError: null,
+    lastErrorTime: null
+  })
   const [events, setEvents] = useState([])
   const [currentTime, setCurrentTime] = useState(0)
   const [markers, setMarkers] = useState([])
@@ -189,6 +195,10 @@ function App() {
       setApiKeyMissing(!data.keyConfigured)
     })
 
+    newSocket.on('narrationStatus', (status) => {
+      setNarrationStatus(status)
+    })
+
     newSocket.on('disconnect', () => {
       console.log('Disconnected from dashboard server')
     })
@@ -315,6 +325,20 @@ function App() {
     return '🖥️'
   }
 
+  const getNarrationStatusColor = () => {
+    if (!narrationStatus.keyConfigured) return 'red'
+    if (narrationStatus.successRate >= 0.9) return 'green'
+    if (narrationStatus.successRate >= 0.5) return 'orange'
+    return 'red'
+  }
+
+  const getNarrationStatusTooltip = () => {
+    if (!narrationStatus.keyConfigured) return 'API key niet geconfigureerd'
+    if (narrationStatus.successRate >= 0.9) return 'Haiku werkt goed'
+    if (narrationStatus.successRate >= 0.5) return `Sommige fouten: ${narrationStatus.lastError}`
+    return `Veel fouten: ${narrationStatus.lastError}`
+  }
+
   // Helper to get last activity time for an agent
   const getLastActivityTime = (agent) => {
     // Use lastActivityTime if available (most accurate)
@@ -417,6 +441,12 @@ function App() {
             onClick={toggleNarratorMode}
           >
             Mode: {narratorMode === 'raw' ? 'Raw' : 'Haiku'}
+            {narratorMode === 'haiku' && (
+              <span
+                className={`status-dot status-${getNarrationStatusColor()}`}
+                title={getNarrationStatusTooltip()}
+              />
+            )}
           </button>
           <button
             className="language-toggle"

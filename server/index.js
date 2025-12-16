@@ -38,6 +38,14 @@ const narrationCache = new Map();
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_MARKERS = 1000;
 
+// Narration statistics for status indicator
+const narrationStats = {
+  totalCalls: 0,
+  successCalls: 0,
+  lastError: null,
+  lastErrorTime: null
+};
+
 // Smart agent file parsing
 const AGENT_ACTIVE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -852,6 +860,18 @@ function parseSession(filepath) {
   return { events: [], agents, orchestrator, markers: limitedMarkers };
 }
 
+// Emit narration status to socket
+function emitNarrationStatus(socket) {
+  socket.emit('narrationStatus', {
+    keyConfigured: !!process.env.ANTHROPIC_API_KEY,
+    successRate: narrationStats.totalCalls > 0
+      ? narrationStats.successCalls / narrationStats.totalCalls
+      : 1,
+    lastError: narrationStats.lastError,
+    lastErrorTime: narrationStats.lastErrorTime
+  });
+}
+
 // Narrate using Haiku (optional)
 async function narrateTask(text, language = 'nl') {
   console.log('[narrateTask] Called with:', { text, language });
@@ -882,6 +902,9 @@ async function narrateTask(text, language = 'nl') {
   }
 
   try {
+    // Increment total calls
+    narrationStats.totalCalls++;
+
     const { default: Anthropic } = await import('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey });
 
@@ -910,6 +933,9 @@ Action: "${text}"`
 
     // Store in cache if successful
     if (narration) {
+      // Increment success calls
+      narrationStats.successCalls++;
+
       narrationCache.set(cacheKey, {
         narration,
         timestamp: Date.now()
@@ -920,6 +946,11 @@ Action: "${text}"`
     return narration;
   } catch (error) {
     console.error('[narrateTask] Error:', error.message);
+
+    // Store error info
+    narrationStats.lastError = error.message;
+    narrationStats.lastErrorTime = Date.now();
+
     return null;
   }
 }
@@ -1090,6 +1121,9 @@ io.on('connection', (socket) => {
 
   // Emit API status on connection
   socket.emit('apiStatus', { keyConfigured: !!process.env.ANTHROPIC_API_KEY });
+
+  // Emit narration status on connection
+  emitNarrationStatus(socket);
 
   // Send initial session list
   const claudeDir = path.join(process.env.HOME, '.claude', 'projects');
@@ -1394,9 +1428,15 @@ io.on('connection', (socket) => {
       const narration = await narrateTask(text, language);
       console.log('[Socket] Sending narrated response:', { text, narration });
       socket.emit('narrated', { text, narration: narration || text });
+
+      // Emit updated narration status after each call
+      emitNarrationStatus(socket);
     } catch (error) {
       console.error('[Socket] Narrate error:', error.message);
       socket.emit('narrated', { text, narration: text, error: error.message });
+
+      // Emit updated narration status after error
+      emitNarrationStatus(socket);
     }
   });
 

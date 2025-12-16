@@ -88,6 +88,9 @@ body.light-theme {
   cursor: pointer;
   font-size: 0.75rem;
   transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
 .narrator-toggle:hover,
@@ -95,6 +98,17 @@ body.light-theme {
 .theme-toggle:hover {
   background-color: var(--accent-primary);
 }
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  vertical-align: middle;
+}
+.status-green { background: #4caf50; }
+.status-orange { background: #ff9800; }
+.status-red { background: #f44336; }
 
 .theme-toggle {
   font-size: 1rem;
